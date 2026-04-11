@@ -1,30 +1,54 @@
 """
-Подготовка данных: чтение .txt файлов, чанкинг, эмбеддинг, сохранение в LanceDB.
+Подготовка данных: чтение PDF, очистка, чанкинг (1500/400), эмбеддинг, сохранение в LanceDB.
 """
 from pathlib import Path
-import lancedb
-import pyarrow as pa
-from chunking import adaptive_chunking
-from embedder import Embedder
-from tqdm import tqdm
+import re
 import sys
 
-# Добавляем корень проекта в sys.path для импорта src.config
+import lancedb
+import pyarrow as pa
+from pypdf import PdfReader
+from chunking import semantic_chunking
+from embedder import Embedder
+from tqdm import tqdm
+
+# Добавляем корень проекта для импорта src.config
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.config import settings
 
-def read_txt_file(file_path: Path) -> str:
-    """Читает текстовый файл и возвращает его содержимое."""
-    with open(file_path, "r", encoding="utf-8") as f:
-        return f.read()
 
-def process_txt_files(data_dir: str, db_uri: str, table_name: str, embedder: Embedder):
-    """
-    Обрабатывает все .txt файлы в директории, создаёт чанки, вычисляет эмбеддинги
-    и сохраняет в LanceDB.
-    """
+def extract_year_from_filename(filename: str) -> int:
+    match = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", filename)
+    if not match:
+        raise ValueError(f"Не удалось извлечь год из имени файла: {filename}")
+    return int(match.group(0))
+
+
+def clean_text(text: str) -> str:
+    """Базовая очистка текста PDF."""
+    text = text.replace("\xa0", " ").replace("\u200b", " ").replace("\r", "\n")
+    text = re.sub(r"-\n(?=\w)", "", text)  # убираем переносы слов
+    # Заменяем два и более переносов строки на плейсхолдер, одиночные – на пробел
+    placeholder = "<<<PARA>>>"
+    text = re.sub(r"\n{2,}", placeholder, text)
+    text = re.sub(r"\n", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = text.replace(placeholder, "\n\n")
+    return text.strip()
+
+
+def extract_text_from_pdf(pdf_path: Path) -> str:
+    reader = PdfReader(str(pdf_path))
+    pages = []
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        if page_text.strip():
+            pages.append(page_text.strip())
+    return clean_text("\n\n".join(pages))
+
+
+def process_pdfs(pdf_dir: str, db_uri: str, table_name: str, embedder: Embedder):
     db = lancedb.connect(db_uri)
-    # Создаём таблицу (перезаписываем, если есть)
     schema = pa.schema([
         pa.field("text", pa.string()),
         pa.field("chunk_id", pa.int32()),
@@ -35,31 +59,22 @@ def process_txt_files(data_dir: str, db_uri: str, table_name: str, embedder: Emb
     db.create_table(table_name, schema=schema, mode="overwrite")
     table = db.open_table(table_name)
 
-    txt_files = list(Path(data_dir).glob("*.txt"))
-    if not txt_files:
-        print(f"В папке {data_dir} нет .txt файлов!")
+    pdf_files = list(Path(pdf_dir).glob("*.pdf"))
+    if not pdf_files:
+        print(f"В папке {pdf_dir} нет PDF-файлов!")
         return
 
-    for txt_path in tqdm(txt_files, desc="Processing TXT files"):
-        # Определяем год из имени файла (например, report_2019.txt или 2019.txt)
-        try:
-            year = int(''.join(filter(str.isdigit, txt_path.stem)))
-        except ValueError:
-            print(f"Не удалось извлечь год из имени файла {txt_path.name}, пропускаем.")
-            continue
+    for pdf_path in tqdm(pdf_files, desc="Processing PDFs"):
+        year = extract_year_from_filename(pdf_path.name)
+        text = extract_text_from_pdf(pdf_path)
 
-        text = read_txt_file(txt_path)
-
-        chunks = adaptive_chunking(
+        chunks = semantic_chunking(
             text,
-            min_chunk_size=800,
-            max_chunk_size=1500,
-            min_chunk_overlap=200,
-            max_chunk_overlap=400,
-            metadata={"source": txt_path.name, "year": year},
+            chunk_size=1500,
+            chunk_overlap=400,
+            metadata={"source": pdf_path.name, "year": year},
         )
 
-        # Подготовка записей для вставки
         records = []
         for chunk in chunks:
             embedding = embedder.embed(chunk.page_content)
@@ -76,17 +91,22 @@ def process_txt_files(data_dir: str, db_uri: str, table_name: str, embedder: Emb
 
     print(f"Готово! Таблица '{table_name}' содержит {table.count_rows()} строк.")
 
-if __name__ == "__main__":
-    # Используем настройки из settings
-    API_KEY = settings.polza_ai_api_key
-    BASE_URL = "https://api.polza.ai/api/v1"
-    MODEL = "text-embedding-3-small"
 
-    embedder = Embedder(api_key=API_KEY, base_url=BASE_URL, model=MODEL)
+if __name__ == "__main__":
+    # Пути относительно расположения скрипта
     script_dir = Path(__file__).parent
-    process_txt_files(
-        data_dir=  str(script_dir / "dataset"),
-        db_uri="lectures/lecture_4/lance_db/vectorstore",
+    pdf_dir = script_dir / "dataset"
+    db_uri = script_dir / "lance_db" / "vectorstore"
+
+    embedder = Embedder(
+        api_key=settings.polza_ai_api_key,
+        base_url="https://api.polza.ai/api/v1",
+        model="text-embedding-3-small"
+    )
+
+    process_pdfs(
+        pdf_dir=str(pdf_dir),
+        db_uri=str(db_uri),
         table_name="chunks",
         embedder=embedder,
     )
