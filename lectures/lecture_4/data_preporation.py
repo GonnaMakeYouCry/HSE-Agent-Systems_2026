@@ -48,16 +48,14 @@ def process_txt_files(data_dir: str, db_uri: str, table_name: str, embedder: Emb
             print(f"Не удалось извлечь год из имени файла {txt_path.name}, пропускаем.")
             continue
 
-        # Чтение текста
         text = read_txt_file(txt_path)
 
-        # Чанкинг (адаптивный)
         chunks = adaptive_chunking(
             text,
-            min_chunk_size=300,
-            max_chunk_size=1000,
-            min_chunk_overlap=30,
-            max_chunk_overlap=150,
+            min_chunk_size=800,
+            max_chunk_size=1500,
+            min_chunk_overlap=200,
+            max_chunk_overlap=400,
             metadata={"source": txt_path.name, "year": year},
         )
 
@@ -85,8 +83,9 @@ if __name__ == "__main__":
     MODEL = "text-embedding-3-small"
 
     embedder = Embedder(api_key=API_KEY, base_url=BASE_URL, model=MODEL)
+    script_dir = Path(__file__).parent
     process_txt_files(
-        data_dir="""D:\Учёба\Учёба ВШЭ\\2 семестр\HSE-Agent-Systems_2026\lectures\lecture_4\dataset""",
+        data_dir=  str(script_dir / "dataset"),
         db_uri="lectures/lecture_4/lance_db/vectorstore",
         table_name="chunks",
         embedder=embedder,

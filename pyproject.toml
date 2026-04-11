@@ -36,4 +36,5 @@ dependencies = [
     "python-levenshtein>=0.27.3",
     "ragas>=0.4.3",
     "notebook>=7.5.5",
+    "pymorphy3>=2.0.6",
 ]
